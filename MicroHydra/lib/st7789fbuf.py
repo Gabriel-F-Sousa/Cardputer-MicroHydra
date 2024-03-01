@@ -60,26 +60,25 @@ This driver supports:
 
 import math
 import framebuf, struct, array
-import machine
 import time
 
 # ST7789 commands
-_ST7789_SWRESET = b"\x01"
-_ST7789_SLPIN = b"\x10"
-_ST7789_SLPOUT = b"\x11"
-_ST7789_NORON = b"\x13"
-_ST7789_INVOFF = b"\x20"
-_ST7789_INVON = b"\x21"
-_ST7789_DISPOFF = b"\x28"
-_ST7789_DISPON = b"\x29"
-_ST7789_CASET = b"\x2a"
-_ST7789_RASET = b"\x2b"
-_ST7789_RAMWR = b"\x2c"
-_ST7789_VSCRDEF = b"\x33"
-_ST7789_COLMOD = b"\x3a"
-_ST7789_MADCTL = b"\x36"
-_ST7789_VSCSAD = b"\x37"
-_ST7789_RAMCTL = b"\xb0"
+_ST7789_SWRESET = const(b"\x01")
+_ST7789_SLPIN = const(b"\x10")
+_ST7789_SLPOUT = const(b"\x11")
+_ST7789_NORON = const(b"\x13")
+_ST7789_INVOFF = const(b"\x20")
+_ST7789_INVON = const(b"\x21")
+_ST7789_DISPOFF = const(b"\x28")
+_ST7789_DISPON = const(b"\x29")
+_ST7789_CASET = const(b"\x2a")
+_ST7789_RASET = const(b"\x2b")
+_ST7789_RAMWR = const(b"\x2c")
+_ST7789_VSCRDEF = const(b"\x33")
+_ST7789_COLMOD = const(b"\x3a")
+_ST7789_MADCTL = const(b"\x36")
+_ST7789_VSCSAD = const(b"\x37")
+_ST7789_RAMCTL = const(b"\xb0")
 
 # MADCTL bits
 _ST7789_MADCTL_MY = const(0x80)
@@ -154,13 +153,6 @@ _DISPLAY_128x128 = (
     (0x60, 128, 128, 1, 2, False),
     (0xc0, 128, 128, 2, 1, False),
     (0xa0, 128, 128, 1, 2, False))
-
-# index values into rotation table
-_WIDTH = const(0)
-_HEIGHT = const(1)
-_XSTART = const(2)
-_YSTART = const(3)
-_NEEDS_SWAP = const(4)
 
 # Supported displays (physical width, physical height, rotation table)
 _SUPPORTED_DISPLAYS = (
@@ -373,7 +365,6 @@ class ST7789:
         custom_init=None,
         custom_rotations=None,
         custom_framebufs=None,
-        brightness=10,
     ):
         """
         Initialize display.
@@ -428,30 +419,12 @@ class ST7789:
         self.init(self.init_cmds)
         self.rotation(self._rotation)
         self.needs_swap = True
-        self.fill(0x0)
+        for i in range(len(self.fbufs)):
+            #self.fill(0, buf_idx=i)
+            self.show(buf_idx=i)
 
         if backlight is not None:
-            self.backlight = machine.PWM(backlight)
-            self.backlight.freq(1000)
-        self.brightness(brightness)
-
-    def brightness(self, brightness_value:int|float):
-        """
-        Set display brightness.
-        Args:
-            brightness_value (int):
-                A value from 0-10 (inclusive) representing display brightness.
-        """
-        if brightness_value <= 0:
-            self.backlight.duty_u16(22000)
-        elif brightness_value >= 10:
-            self.backlight.duty_u16(65535)
-        else:
-            self.backlight.duty_u16(
-                22000 + math.floor(
-                    ((65535 - 22000) // 10) * brightness_value
-                    )
-                )
+            backlight.value(1)
 
     @staticmethod
     def _find_rotations(width, height):

@@ -39,7 +39,7 @@ tone_map = {
 }
 
 class Beeper:
-    def __init__(self, buf_size=3000):
+    def __init__(self, buf_size=2048):
         import machine
         self._output = machine.I2S(            
             1,
@@ -50,7 +50,7 @@ class Beeper:
             bits=16,
             format=machine.I2S.STEREO,
             rate=16000,
-            ibuf=2100)
+            ibuf=2048)
         
         self._current_notes = []
 
@@ -63,7 +63,7 @@ class Beeper:
         self._output.deinit()
         
         
-    @micropython.viper #viper HATES my esp32-s3 :(
+    #@micropython.viper #viper HATES my esp32-s3 :(
     # it works when uncompiled. But compiled, it deep-fries all the audio. 
     def gen_square_wave(self, frequency:int, time_ms:int, high_sample:int) -> int:
         """
@@ -116,7 +116,7 @@ class Beeper:
     
     
     
-    @micropython.viper
+    #@micropython.viper
     def double_square_wave(self, frequency1:int, frequency2:int, time_ms:int, high_sample:int) -> int:
         """
         This is the same as self.gen_square_wave, except it has been refactored to play two frequencies together.
@@ -187,7 +187,7 @@ class Beeper:
 
         return written_bytes
 
-    @micropython.viper
+    #@micropython.viper
     def triple_square_wave(self, frequency1:int, frequency2:int, frequency3:int, time_ms:int, high_sample:int) -> int:
         """
         This is the same as self.gen_square_wave/self.double_square_wave,

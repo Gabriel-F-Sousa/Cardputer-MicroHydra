@@ -1,7 +1,3 @@
-
-
-
-
 """
 
 VERSION: 0.7
@@ -32,41 +28,42 @@ This approach was chosen to reduce the chance of conflicts or memory errors when
 Because MicroPython completely resets between apps, the only "wasted" ram from the app switching process will be from launcher.py
 
 
-
 """
+import machine, sys, network, gc, time, os, _thread
+import ntptime
+from launcher.icons import battery
+from launcher.icons import icons
+from lib import keyboard
+from lib import beeper
+from lib.mhconfig import Config
+from font import vga2_16x32 as font
+from lib import st7789fbuf as st7789
 
 
-
-#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Constants: ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-
-max_wifi_attemps = const(1000)
-max_ntp_attemps = const(10)
-
-#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Global: ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-# these larger objects are created here to reserve their memory asap
-import gc
 gc.collect()
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Create Global Objects: ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#first, create the ESP-idf based obs which are picky about memory and heap usage,
+#then create objects in order from largest to smallest
 
-import network, ntptime
+sd = None #placeholder var for when SDCard can't be initialized
+try:
+    sd = machine.SDCard(slot=2, sck=machine.Pin(40), miso=machine.Pin(39), mosi=machine.Pin(14), cs=machine.Pin(12))
+except OSError as e:
+    print("SDCard couldn't be initialized, gave this error: ", e)
+gc.collect()
+nic = None
 try:
     nic = network.WLAN(network.STA_IF)
 except RuntimeError as e:
-    try:
-        nic = network.WLAN(network.STA_IF)
-    except RuntimeError as e:
-        nic = None
         print("Wifi WLAN object couldnt be created. Gave this error:",e)
+
 gc.collect()
 
-from lib import beeper
-from lib.mhconfig import Config
 beep = beeper.Beeper()
-config = Config()
-
-from lib import st7789fbuf as st7789
-import machine
-#init driver for the graphics
+gc.collect()
+#init driver for the graphics immediately, (creates large framebuffer objects, trying to minimize memory fragmentation issues)
 tft = st7789.ST7789(
     machine.SPI(1, baudrate=40000000, sck=machine.Pin(36), mosi=machine.Pin(35), miso=None),
     135,
@@ -80,39 +77,92 @@ tft = st7789.ST7789(
     custom_framebufs =((0,0,240,35),(0,35,240,38),(0,73,240,39),(0,112,240,23))
     ) # 	buf_idx: 0(status bar), 1(app icons), 2(app text), 3(scroll bar)
 
-
-
-# global vars for animation
-scroll_factor = 0.0
-
-prev_text_scroll_position = 0
-text_scroll_position = 0
-text_drawing = True
-
-prev_icon_scroll_position = 0
-icon_scroll_position = 0
-icon_drawing = True
-
-# control the show() commands
-buf_0_modified = True
-buf_1_modified = True
-buf_2_modified = True
-buf_3_modified = True
-
-# app selector
-app_selector_index = 0
-prev_selector_index = 0
-app_names = []
-app_paths = []
-
-clock_minute_drawn = -1
-
 gc.collect()
-from font import vga2_16x32 as font
-from launcher.icons import icons, battery
-from lib import keyboard
-import time, os
+kb = keyboard.KeyBoard()
 gc.collect()
+#init the ADC for the battery
+batt = machine.ADC(10)
+batt.atten(machine.ADC.ATTN_11DB)
+gc.collect()
+rtc = machine.RTC()
+gc.collect()
+config = Config()
+
+
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ WIFI and RTC: ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+
+def wifi_sync_rtc(rtc, nic):
+    # sync our clock if set in the config:
+    if config['sync_clock'] and nic != None:
+        # no point if there's no connection settings, or if clock already set
+        if config['wifi_ssid'] != '' and rtc.datetime()[0] == 2000: 
+            try:
+                # create object to control network conenction
+                #nic = network.WLAN(network.STA_IF)
+                _MAX_WIFI_ATTEMPTS = const(100)
+                _MAX_NTP_ATTEMPTS = const(10)
+
+                gc.collect()
+                
+                if not nic.active(): # turn on wifi if it isn't already
+                    nic.active(True)
+                
+                
+                connection_attempts = 0
+                while not nic.isconnected(): #wait for connection
+                    try:
+                        nic.connect(config['wifi_ssid'], config['wifi_pass'])
+                    except OSError as e:
+                        print("wifi_sync_rtc had this error when connecting:",e)
+                        gc.collect()
+                        time.sleep(1)
+                    connection_attempts += 1
+                    if connection_attempts >= _MAX_WIFI_ATTEMPTS:
+                        break
+                    time.sleep_ms(10)
+                    
+                #once connected, try syncing clock with ntp server
+                if nic.isconnected():
+                    ntp_attempts = 0
+                    while rtc.datetime()[0] == 2000 and ntp_attempts < _MAX_NTP_ATTEMPTS: #while clock is on default value/haven't passed max attempts
+                        #ntptime.settime()
+                        try:
+                            ntptime.settime()
+                        except OSError as e:
+                            print("ntptime had this error when connecting:", e)
+                            pass # ntptime.settime() throws OSErrors sometimes, even if it works
+                        time.sleep(1)
+                        ntp_attempts += 1
+                else:
+                    print("wifi_sync_rtc couldn't connect to wifi")
+                
+                #shut off wifi
+                nic.disconnect()
+                nic.active(False) 
+
+                if rtc.datetime()[0] == 2000:
+                    print('RTC failed to sync.')
+                else:
+                    #apply our timezone offset
+                    time_list = list(rtc.datetime())
+                    time_list[4] = time_list[4] + config['timezone']
+                    rtc.datetime(tuple(time_list))
+                    print(f'RTC successfully synced to {rtc.datetime()}.')
+                gc.collect()
+            except RuntimeError as e:
+                    if nic.active():
+                        try:
+                            nic.active(True)
+                        except:
+                            print("couldn't deactivate nic")
+                    print("Wifi WLAN object couldnt be created. Gave this error:",e)
+
+_thread.start_new_thread(wifi_sync_rtc, (rtc, nic))
+
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Finding Apps ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -124,15 +174,16 @@ def scan_apps(sd):
     
     # if the sd card is not mounted, we need to mount it.
     if "sd" not in main_directory:
-        try:
-            sd = machine.SDCard(slot=2, sck=machine.Pin(40), miso=machine.Pin(39), mosi=machine.Pin(14), cs=machine.Pin(12))
-        except OSError as e:
-            print(e)
-            print("SDCard couldn't be initialized. This might be because it was already initialized and not properly deinitialized.")
+        if "sd" == None:
             try:
-                sd.deinit()
-            except:
-                print("Couldn't deinitialize SDCard")
+                sd = machine.SDCard(slot=2, sck=machine.Pin(40), miso=machine.Pin(39), mosi=machine.Pin(14), cs=machine.Pin(12))
+            except OSError as e:
+                print(e)
+                print("SDCard couldn't be initialized.")
+                try:
+                    sd.deinit()
+                except:
+                    print("Couldn't deinitialize SDCard")
         
         if sd != None: # error above can lead to none type here
             try:
@@ -235,7 +286,7 @@ def launch_app(app_path):
     rtc = machine.RTC()
     rtc.memory(app_path)
     print(f"Launching '{app_path}...'")
-    # reset clock speed to default. 
+    # reset clock speed to default.
     machine.freq(160_000_000)
     time.sleep_ms(10)
     machine.reset()
@@ -306,15 +357,14 @@ def read_battery_level(adc):
 
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ GRAPHICS ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-def scroll_text():
+def scroll_text(tft, scroll_factor, app_names, app_selector_index, prev_selector_index, config):
     """Handle scrolling animation for app text (buf_idx = 2)"""
-    global tft, scroll_factor, prev_text_scroll_position, text_scroll_position, text_drawing
-    global app_names, app_selector_index, prev_selector_index, config, appname_y
+    global text_scroll_position, prev_text_scroll_position
     
     if scroll_factor < 0: # handle negative numbers
-        text_ease_factor = -ease_in_out_quart( abs(scroll_factor * scroll_factor))
+        text_ease_factor = -ease_in_out_quart( abs(scroll_factor))
     else:
-        text_ease_factor = ease_in_out_quart(scroll_factor * scroll_factor)
+        text_ease_factor = ease_in_out_quart(scroll_factor)
         
     # scroll text out of view using scroll method
     text_scroll_position = int(text_ease_factor * 240)
@@ -345,21 +395,20 @@ def scroll_text():
     tft.show(buf_idx=2)
     
     
-def scroll_icon():
+def scroll_icon(tft, scroll_factor, app_names, app_selector_index, config, app_paths):
     """Handle scrolling animation for app icon (buf_idx = 1)"""
-    global tft, scroll_factor, prev_icon_scroll_position, icon_scroll_position, icon_drawing
-    global app_names, app_selector_index, config, app_paths
+    global icon_scroll_position, prev_icon_scroll_position
     
     if scroll_factor < 0: # handle negative numbers
-        icon_ease_factor = -ease_in_out_cubic( abs(scroll_factor * scroll_factor))
+        icon_ease_factor = -ease_in_out_cubic( abs(scroll_factor))
     else:
-        icon_ease_factor = ease_in_out_cubic(scroll_factor * scroll_factor)
+        icon_ease_factor = ease_in_out_cubic(scroll_factor)
     
     # scroll text out of view using scroll method
     icon_scroll_position = int(icon_ease_factor * 240)
     tft.scroll(icon_scroll_position - prev_icon_scroll_position, 0, buf_idx=1)
     
-    if 40 < abs(icon_scroll_position) < 80 or icon_scroll_position == 0:
+    if 30 < abs(icon_scroll_position) < 130 or icon_scroll_position == 0:
         # redraw icons
         #blackout old icon
         tft.fill(config['bg_color'], buf_idx=1)
@@ -384,9 +433,8 @@ def scroll_icon():
             tft.bitmap_icons(icons, icons.FLASH, config['ui_color'],104 + icon_scroll_position, 36, buf_idx=1)
     tft.show(buf_idx=1)
 
-def draw_status_bar():
+def draw_status_bar(tft, config, batt):
     """Handle redrawing the status bar (buf_idx = 0)"""
-    global tft, buf_0_modified, config, batt
     
     tft.fill(config['bg_color'], buf_idx=0)
     tft.fill_rect(0,0,240, 16, config.palette[2], buf_idx=0)
@@ -402,22 +450,19 @@ def draw_status_bar():
     
     #battery
     battlevel = read_battery_level(batt)
-    tft.bitmap_icons(battery, battery.FULL, config.extended_colors[0],209, 4, buf_idx=0) # shadow
+    tft.bitmap_icons(battery, battery.FULL, config.palette[0],209, 4, buf_idx=0) # shadow
     if battlevel == 3:
-        tft.bitmap_icons(battery, battery.FULL, config.extended_colors[1],208, 3, buf_idx=0)
+        tft.bitmap_icons(battery, battery.FULL, config.rgb_colors[1],208, 3, buf_idx=0)
     elif battlevel == 2:
         tft.bitmap_icons(battery, battery.HIGH, config['ui_color'],208, 3, buf_idx=0)
     elif battlevel == 1:
         tft.bitmap_icons(battery, battery.LOW, config['ui_color'],208, 3, buf_idx=0)
     else:
-        tft.bitmap_icons(battery, battery.EMPTY, config.extended_colors[0],208, 3, buf_idx=0)
+        tft.bitmap_icons(battery, battery.EMPTY, config.rgb_colors[0],208, 3, buf_idx=0)
     tft.show(buf_idx=0)
-    buf_0_modified = True
     
-def draw_scroll_bar():
+def draw_scroll_bar(tft, config, app_selector_index, app_names):
     """Handle redrawing the scroll bar (buf_idx = 3)"""
-    global tft, buf_3_modified, config, app_selector_index, app_names
-    
     tft.fill(config['bg_color'], buf_idx=3)
     
     exact_scrollbar_width = 232 / len(app_names)
@@ -435,57 +480,32 @@ def draw_scroll_bar():
 #--------------------------------------------------------------------------------------------------
 
 def main_loop():
-    global scroll_factor, prev_text_scroll_position, text_scroll_position, text_drawing, prev_icon_scroll_position
-    global icon_scroll_position, icon_drawing, buf_0_modified, buf_1_modified, buf_2_modified, buf_3_modified
-    global app_selector_index, prev_selector_index, app_names, app_paths, clock_minute_drawn, batt
+    global sd, rtc, tft, kb, beep, config, batt
+    global prev_icon_scroll_position, icon_scroll_position, prev_text_scroll_position, text_scroll_position
     
-    
-    #bump up our clock speed so the UI feels smoother (240mhz is the max officially supported, but the default is 160mhz)
     machine.freq(240_000_000)
-    
-        
-    # sync our RTC on boot, if set in settings
-    syncing_clock = config['sync_clock']
-    sync_ntp_attemps = 0
-    connect_wifi_attemps = 0
-    rtc = machine.RTC()
-    
-
-    if config['wifi_ssid'] == '':
-        syncing_clock = False # no point in wasting resources if wifi hasn't been setup
-    elif rtc.datetime()[0] != 2000: #clock wasn't reset, assume that time has already been set
-        syncing_clock = False
-        
-    if syncing_clock and nic != None: #enable wifi if we are syncing the clock
-        if not nic.active(): # turn on wifi if it isn't already
-            nic.active(True)
-        if not nic.isconnected(): # try connecting
-            try:
-                nic.connect(config['wifi_ssid'], config['wifi_pass'])
-            except OSError as e:
-                print("wifi_sync_rtc had this error when connecting:",e)
-    
     #before anything else, we should scan for apps
-    sd = None #dummy var for when we cant mount SDCard
     app_names, app_paths, sd = scan_apps(sd)
     
+    
+    # global vars for animation
+    scroll_factor = 0.0
+
+    prev_text_scroll_position = 0
+    text_scroll_position = 0
+    text_drawing = True
+
+    prev_icon_scroll_position = 0
+    icon_scroll_position = 0
+    icon_drawing = True
+
+    # app selector
     app_selector_index = 0
     prev_selector_index = 0
-    
-    #init the keyboard
-    kb = keyboard.KeyBoard()
-    
-    #init the ADC for the battery
-    batt = machine.ADC(10)
-    batt.atten(machine.ADC.ATTN_11DB)
 
-    
-    #nonscroll_elements_displayed = False
-    
+    clock_minute_drawn = -1
+
     force_redraw_display = True
-    
-    #this is used as a flag to tell a future loop to redraw the frame mid-scroll animation
-    delayed_redraw = False
     
     #starupp sound
     if config['ui_sound']:
@@ -495,20 +515,17 @@ def main_loop():
                    ('F3','A3','C3'),
                    ('F3','A3','C3')),130,config['volume'])
         
-        
-    # init diplsay
-    # icons
-    tft.fill(config['bg_color'], buf_idx=1)
-    tft.show(buf_idx=1)
-    # text
-    tft.fill(config['bg_color'], buf_idx=2)
-    tft.show(buf_idx=2)
-    # scroll bar
-    tft.fill(config['bg_color'], buf_idx=3)
-    tft.show(buf_idx=3)
-    
-    loop_timer = 0
-    
+#     # init diplsay
+#     # icons
+#     tft.fill(config['bg_color'], buf_idx=1)
+#     tft.show(buf_idx=1)
+#     # text
+#     tft.fill(config['bg_color'], buf_idx=2)
+#     tft.show(buf_idx=2)
+#     # scroll bar
+#     tft.fill(config['bg_color'], buf_idx=3)
+#     tft.show(buf_idx=3)
+#     
     while True:
         # ----------------------- check for key presses on the keyboard. Only if they weren't already pressed. --------------------------
         new_keys = kb.get_new_keys()
@@ -535,8 +552,6 @@ def main_loop():
                 app_selector_index -= 1
                 
                 #animation:
-                
-                #scroll_direction = -1
                 scroll_factor = -1.0
                 text_drawing = True
                 icon_drawing = True
@@ -580,7 +595,6 @@ def main_loop():
                     tft.fill(0)
                     tft.sleep_mode(True)
                     machine.Pin(38, machine.Pin.OUT).value(0) #backlight off
-                    spi.deinit()
                     
                     if sd != None:
                         try:
@@ -620,8 +634,7 @@ def main_loop():
                                         text_scroll_position = 240
                                         prev_icon_scroll_position = 240
                                         icon_scroll_position = 240
-                                        #scroll_direction = 1
-                                    #current_vscsad = target_vscsad
+
                                     # go there!
                                     app_selector_index = idx
                                     if config['ui_sound']:
@@ -633,83 +646,51 @@ def main_loop():
         #wrap around our selector index, in case we go over or under the target amount
         app_selector_index = app_selector_index % len(app_names)
     
-    
         time.sleep_ms(1)
         
         
-    #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Main Graphics: ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Main Graphics: ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         
         
         # handle scroll_factor
-        if scroll_factor != 0:
+        if scroll_factor != 0 or force_redraw_display:
             if scroll_factor > 0:
-                scroll_factor -= min(0.1, abs(scroll_factor))
+                scroll_factor -= min(0.11, abs(scroll_factor))
             else:
-                scroll_factor += min(0.1, abs(scroll_factor))
+                scroll_factor += min(0.11, abs(scroll_factor))
         
-        if text_drawing:
-            scroll_text()
+        if text_drawing or force_redraw_display:
+            scroll_text(tft, scroll_factor, app_names, app_selector_index, prev_selector_index, config)
             if text_scroll_position == 0:
                 text_drawing = False
             
-        if icon_drawing:
-            scroll_icon()
+        if icon_drawing or force_redraw_display:
+            scroll_icon(tft, scroll_factor, app_names, app_selector_index, config, app_paths)
             if icon_scroll_position == 0:
                 icon_drawing = False
                 
-        if time.localtime()[4] != clock_minute_drawn:
+        if time.localtime()[4] != clock_minute_drawn or force_redraw_display:
             clock_minute_drawn = time.localtime()[4]
-            draw_status_bar()
+            draw_status_bar(tft, config, batt)
             
-        if app_selector_index != prev_selector_index:
-            draw_scroll_bar()
+        if app_selector_index != prev_selector_index or force_redraw_display:
+            draw_scroll_bar(tft, config, app_selector_index, app_names)
+
+
 
         # reset vars for next loop
         force_redraw_display = False
         prev_selector_index = app_selector_index
         prev_text_scroll_position = text_scroll_position
         prev_icon_scroll_position = icon_scroll_position
-        loop_timer = (loop_timer + 1) % 10
         
-        #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-        #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ WIFI and RTC: ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-        #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-        
-        if syncing_clock and nic != None:
-            if nic.isconnected():
-                try:
-                    ntptime.settime()
-                except OSError:
-                    sync_ntp_attemps += 1
-                    
-                if rtc.datetime()[0] != 2000:
-                    nic.disconnect()
-                    nic.active(False) #shut off wifi
-                    syncing_clock = False
-                    #apply our timezone offset
-                    time_list = list(rtc.datetime())
-                    time_list[4] = time_list[4] + config['timezone']
-                    rtc.datetime(tuple(time_list))
-                    print(f'RTC successfully synced to {rtc.datetime()} with {sync_ntp_attemps} attemps.')
-                    
-                elif sync_ntp_attemps >= max_ntp_attemps:
-                    nic.disconnect()
-                    nic.active(False) #shut off wifi
-                    syncing_clock = False
-                    print(f"Syncing RTC aborted after {sync_ntp_attemps} attemps")
-                
-            elif connect_wifi_attemps >= max_wifi_attemps:
-                nic.disconnect()
-                nic.active(False) #shut off wifi
-                syncing_clock = False
-                print(f"Connecting to wifi aborted after {connect_wifi_attemps} loops")
-            else:
-                connect_wifi_attemps += 1
+
         
 # run the main loop!
 main_loop()
+
 
 
 
